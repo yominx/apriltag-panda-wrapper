@@ -2,10 +2,14 @@
 // Copyright(c) 2017 Intel Corporation. All Rights Reserved.
 
 #include <iostream>
+#include <fstream>
 #include <ostream>
 #include <Eigen/Dense>
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <opencv2/opencv.hpp>   // Include OpenCV API
+#include <franka/exception.h>
+#include <franka/robot_state.h>
+#include <franka/robot.h>
 #include "apriltag.hpp" 
 
 using namespace std; 
@@ -22,42 +26,15 @@ void get_opt_option(apriltag_detector_t *td, getopt_t *getopt);
 
 void draw_marker(Mat *frame,apriltag_detection_t *det);
 
-void print_pose(apriltag_pose_t *pose){
-    //for R
-    int r = pose->R->nrows, c=pose->R->ncols;
-    for (int i = 0; i < r; i++){
-       for (int j = 0; j < c; j++){
-            // cout << i*c+j << endl;
-            cout << pose->R->data[i*c+j] << " ";
-       } 
-       cout << endl;
-    }
-    cout << endl;
-    
-    //for t
-    r = pose->t->nrows, c=pose->t->ncols;
-    for (int i = 0; i < r; i++){
-       for (int j = 0; j < c; j++){
-            cout << pose->t->data[i*c+j] << " ";
-       } 
-       cout << endl;
-    }
-    cout << endl;
-
-}
 
 int main(int argc, char * argv[]) try
 {
-    // Init realsense library 
-
-
+    /* Initialize realsense library */
     auto config = rs2::config();
     config.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_BGR8, 30);
      
-
     rs2::colorizer color_map;
     rs2::pipeline pipe;
-
 
     auto selection      = pipe.start();
     auto color_stream   = selection.get_stream(RS2_STREAM_COLOR).as<rs2::video_stream_profile>();
@@ -65,7 +42,7 @@ int main(int argc, char * argv[]) try
     auto int_params     = color_stream.get_intrinsics();
 
     
-    // April tag initialization part
+    /* April tag initialization part */
     getopt_t *getopt = getopt_create();
     getopt_addition(getopt);
 
@@ -75,13 +52,14 @@ int main(int argc, char * argv[]) try
         exit(0);
     }
 
-    // Initialize tag detector with options
+    /* Initialize tag detector with options */
     const char *famname = getopt_get_string(getopt, "family");
     apriltag_family_t *tf = init_family(famname);
     apriltag_detector_t *td = apriltag_detector_create();
     apriltag_detector_add_family(td, tf);
     get_opt_option(td, getopt);
 
+    /* Set intrinsic parameters */
     apriltag_detection_info_t info;
     const double tag_size = 0.0428;
     info.tagsize = tag_size;
@@ -91,11 +69,14 @@ int main(int argc, char * argv[]) try
     info.cy = int_params.ppy;
 
 
+    /* Load transformation matrix from Base to Camera*/
+    MatrixXd T_O_CAM(4,4);
+
     // Fetch and Detect
 
     apriltag_pose_t pose;
-    cout << "To capture the picture, press 'c' " << endl;
     Mat gray, frame;
+
     while (1) // To capture the picture, press 'c'
     {
         rs2::frameset data = pipe.wait_for_frames();
@@ -104,7 +85,7 @@ int main(int argc, char * argv[]) try
         const int h = color.as<rs2::video_frame>().get_height();
         Mat image(Size(w, h), CV_8UC3, (void*)color.get_data(), Mat::AUTO_STEP);
 
-        cvtColor(image, frame, CV_RGB2BGR);
+        cvtColor(image, frame, COLOR_RGB2BGR);
         cvtColor(frame, gray, COLOR_BGR2GRAY);
 
         // Make an image_u8_t header for the Mat data
@@ -127,10 +108,8 @@ int main(int argc, char * argv[]) try
         }
 
         imshow("Tag Detections", frame);
-        if (waitKey(1) == 'c'){
-            if (zarray_size(detections) == 1) break;
-            else cout << "There shoule be only one marker in the frame." << endl;
-        }
+
+
 
         apriltag_detections_destroy(detections);
         // Update the window with new data
@@ -140,46 +119,6 @@ int main(int argc, char * argv[]) try
 
 
     /* Transformation matrix */
-
-    MatrixXd SO3(3,3), T_O_EE(4,4), T_EE_MARK(4,4),
-             T_MARK_CAM_rot(4,4), T_MARK_CAM_trans(4,4),  T_O_CAM(4,4);
-                     
-    SO3                = MatrixXd::Identity(3,3);
-    T_O_EE             = MatrixXd::Identity(4,4);
-    T_EE_MARK          = MatrixXd::Identity(4,4);
-    T_MARK_CAM_rot     = MatrixXd::Identity(4,4);
-    T_MARK_CAM_trans   = MatrixXd::Identity(4,4);
-    
-    double EE_MARK_trans[4] = {-0.05, 0, 0.0085, 1}; // t = [-0.05, 0, 0.0085]', no rotation. 
-    T_EE_MARK.col(3) = Map<Vector4d>(EE_MARK_trans);
-
-    for (int i = 0; i < 3; i++){
-       for (int j = 0; j < 3; j++){
-            SO3(i,j) = pose.R->data[3*i+j];
-       } 
-    }
-    T_MARK_CAM_rot.block(0,0,3,3) = SO3.inverse();
-
-    double MARK_CAM_trans[4]; 
-    MARK_CAM_trans[0] = -pose.t->data[0];
-    MARK_CAM_trans[1] = -pose.t->data[1];
-    MARK_CAM_trans[2] = -pose.t->data[2];
-    MARK_CAM_trans[3] = 1;
-    T_MARK_CAM_trans.col(3) = Map<Vector4d>(MARK_CAM_trans);
-
-
-
-    T_O_CAM = T_O_EE * T_EE_MARK * T_MARK_CAM_rot * T_MARK_CAM_trans;
-    cout << "Base to EE" << endl << T_O_EE << endl << endl;
-    cout << "EE to marker" << endl << T_EE_MARK << endl << endl;
-    cout << "marker to cam rotation" << endl << T_MARK_CAM_rot << endl << endl;
-    cout << "marker to cam translation" << endl << T_MARK_CAM_trans << endl << endl;
-
-    cout << endl << endl << "Final Result :" << endl << T_O_CAM << endl;
-
-
-    /* Blocker */
-    waitKey();
 
 
     /* destroy apriltag detector */
@@ -292,4 +231,19 @@ void draw_marker(Mat *frame,apriltag_detection_t *det){
     putText(*frame, text, Point(det->c[0]-textsize.width/2,
                                det->c[1]+textsize.height/2),
             fontface, fontscale, Scalar(0xff, 0x99, 0), 2);
+}
+
+
+void matrix_parser(MatrixXd *T_O_EE){
+
+    std::ifstream matrix("BASE_TO_CAM_Matrix.txt");
+
+    for (int i = 0; i < 4; ++i){
+        for (int i = 0; i < 4; ++i){
+            cout << matrix.getline(line,256);
+            (*T_O_EE)(i, j) = ;                
+        }        
+    }
+
+
 }
