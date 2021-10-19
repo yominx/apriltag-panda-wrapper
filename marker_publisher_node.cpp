@@ -9,14 +9,15 @@
 #include <Eigen/Dense>
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <opencv2/opencv.hpp>   // Include OpenCV API
-#include "apriltag.hpp" 
+
+#include "apriltag.hpp"
 
 #include <ros/ros.h>
-#include "geometry_msgs/Pose.h"
-#include "geometry_msgs/Point.h"
-#include "geometry_msgs/Quaternion.h"
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/Quaternion.h>
 
-#define MATRIX_PATH "/home/panda/BASE_TO_CAM_Matrix.txt"
+#define MATRIX_PATH "/home/pandacom/catkin_ws/src/BASE_TO_CAM_Matrix.txt"
 
 using namespace std; 
 using namespace Eigen;
@@ -25,25 +26,29 @@ using namespace cv;
 
 apriltag_family_t *init_family(const char *famname);
 
-void publish_position(geometry_msgs::Pose *grasp_point, MatrixXd *T_O_GRASP);
+void publish_position(ros::Publisher pub, geometry_msgs::PoseStamped *grasp_point, Matrix4d *T_O_GRASP, int frame_id);
 void get_opt_option(apriltag_detector_t *td, getopt_t *getopt);
 void draw_marker(Mat *frame,apriltag_detection_t *det);
-void matrix_parser(MatrixXd *T_O_EE);
-void make_marker_matrix(apriltag_pose_t *pose, MatrixXd *T_CAM_MARKER);
+void matrix_parser(Matrix4d *T_O_EE);
+void make_marker_matrix(apriltag_pose_t *pose, Matrix4d *T_CAM_MARKER);
+void make_grasp_pose(Matrix4d *T_O_MARKER, Matrix4d *T_O_GRASP);
 void getopt_addition(getopt_t *getopt);
 
+ros::Publisher grasp_pos;
 ros::Publisher marker_pos;
 
 int main(int argc, char * argv[]) try
 {
     ros::init(argc, argv, "data_integation");
     ros::NodeHandle n;
-    marker_pos = n.advertise<geometry_msgs::Pose>("/grasp_point", 10);
-    geometry_msgs::Pose grasp_point;
-
+    marker_pos = n.advertise<geometry_msgs::PoseStamped>("/marker_point", 10);
+    grasp_pos = n.advertise<geometry_msgs::PoseStamped>("/grasp_point", 10);
+    geometry_msgs::PoseStamped marker_point;
+    geometry_msgs::PoseStamped grasp_point;
+    ros::Rate loop_rate(100);
 
     /* Load transformation matrix from Base to Camera*/
-    MatrixXd T_O_CAM(4,4), T_CAM_MARKER(4,4), T_MARKER_GRASP(4,4), T_O_GRASP(4,4);
+    Matrix4d T_O_CAM, T_CAM_MARKER, T_MARKER_GRASP, T_O_GRASP, T_O_MARKER;
     matrix_parser(&T_O_CAM);
     T_MARKER_GRASP <<   1,  0,  0, 0,
                         0,  1,  0,-0.14,
@@ -97,7 +102,7 @@ int main(int argc, char * argv[]) try
     apriltag_pose_t pose;
     Mat gray, frame;
 
-    while (1) // To capture the picture, press 'c'
+    while (ros::ok()) // To capture the picture, press 'c'
     {
         rs2::frameset data = pipe.wait_for_frames();
         rs2::frame   color = data.get_color_frame();
@@ -127,11 +132,16 @@ int main(int argc, char * argv[]) try
             double err = estimate_tag_pose(&info, &pose);
 
             make_marker_matrix(&pose, &T_CAM_MARKER);
-            T_O_GRASP = T_O_CAM * T_CAM_MARKER * T_MARKER_GRASP;
+            T_O_MARKER = T_O_CAM * T_CAM_MARKER;
+            make_grasp_pose(&T_O_MARKER, &T_O_GRASP);
+            
 
+            if(det->id == 100) continue;
             cout << "Tag Number: " << det->id << endl;
             cout << "Matrix: " << endl <<  T_O_GRASP << endl;
-            publish_position(&grasp_point, &T_O_GRASP);
+            publish_position(marker_pos, &marker_point, &T_O_MARKER, det->id);
+            publish_position(grasp_pos, &grasp_point, &T_O_GRASP, det->id);
+            // marker_pose
             // cout << "Matrix: " << T_CAM_MARKER * T_MARKER_GRASP << endl;
             // print_pose(&pose);
         }
@@ -144,6 +154,8 @@ int main(int argc, char * argv[]) try
         apriltag_detections_destroy(detections);
         // Update the window with new data
         // imshow(window_name, image);
+        ros::spinOnce();
+        loop_rate.sleep();
     }
 
 
@@ -264,7 +276,7 @@ void draw_marker(Mat *frame,apriltag_detection_t *det){
 }
 
 
-void matrix_parser(MatrixXd *T_O_CAM){
+void matrix_parser(Matrix4d *T_O_CAM){
 
     ifstream matrix(MATRIX_PATH);
 
@@ -288,8 +300,8 @@ void matrix_parser(MatrixXd *T_O_CAM){
 }
 
 
-void make_marker_matrix(apriltag_pose_t *pose, MatrixXd *T_CAM_MARKER){
-    (*T_CAM_MARKER) = MatrixXd::Identity(4,4);
+void make_marker_matrix(apriltag_pose_t *pose, Matrix4d *T_CAM_MARKER){
+    (*T_CAM_MARKER) = Matrix4d::Identity(4,4);
     for (int i = 0; i < 3; i++){
        for (int j = 0; j < 3; j++){
             (*T_CAM_MARKER)(i,j) = pose->R->data[i*3+j];
@@ -301,20 +313,36 @@ void make_marker_matrix(apriltag_pose_t *pose, MatrixXd *T_CAM_MARKER){
     }
 }
 
+void make_grasp_pose(Matrix4d *T_O_MARKER, Matrix4d *T_O_GRASP)
+{
+    Vector3d x, y, z;
+    Vector4d p, pm;
+    Matrix4d T;
+    pm << 0, -0.14, 0.0274, 1;
+    z << 0, 0, -1;
+    x << (*T_O_MARKER).coeff(0,1), (*T_O_MARKER).coeff(1,1), (*T_O_MARKER).coeff(2,1);
+    y = z.cross(x);
+    p = *T_O_MARKER * pm;
+    *T_O_GRASP << x.coeff(0), y.coeff(0), z.coeff(0), p.coeff(0),
+                x.coeff(1), y.coeff(1), z.coeff(1), p.coeff(1),
+                x.coeff(2), y.coeff(2), z.coeff(2), p.coeff(2),
+                0,          0,          0,          1;
+}
 
-
-void publish_position(geometry_msgs::Pose *grasp_point, MatrixXd *T_O_GRASP){
-    grasp_point->position.x = (*T_O_GRASP)(0,3);
-    grasp_point->position.y = (*T_O_GRASP)(1,3);
-    grasp_point->position.z = (*T_O_GRASP)(2,3);
+void publish_position(ros::Publisher pub, geometry_msgs::PoseStamped *pose, Matrix4d *T_O_GRASP, int frame_id){
+    pose->header.stamp = ros::Time();
+    pose->header.frame_id = std::to_string(frame_id);
+    pose->pose.position.x = (*T_O_GRASP)(0,3);
+    pose->pose.position.y = (*T_O_GRASP)(1,3);
+    pose->pose.position.z = (*T_O_GRASP)(2,3);
 
     Matrix3d ROTATION_MAT = (*T_O_GRASP).block(0,0,3,3);
     Quaterniond q(ROTATION_MAT);
 
-    grasp_point->orientation.x = q.x();
-    grasp_point->orientation.y = q.y();
-    grasp_point->orientation.z = q.z();
-    grasp_point->orientation.w = q.w();
+    pose->pose.orientation.x = q.x();
+    pose->pose.orientation.y = q.y();
+    pose->pose.orientation.z = q.z();
+    pose->pose.orientation.w = q.w();
 
-    marker_pos.publish(*grasp_point);
+    pub.publish(*pose);
 }

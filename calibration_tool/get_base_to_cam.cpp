@@ -10,7 +10,7 @@
 #include <franka/exception.h>
 #include <franka/robot_state.h>
 #include <franka/robot.h>
-#include "apriltag.hpp" 
+#include "../apriltag.hpp" 
 
 using namespace std; 
 using namespace Eigen;
@@ -72,6 +72,10 @@ int main(int argc, char * argv[]) try
     info.cx = int_params.ppx;
     info.cy = int_params.ppy;
 
+    cout << "Detecting marker..." << endl;
+    cout << "Size: 42.8mm" << endl;
+    cout << "Tag: 36h11_100" << endl;
+
 
     // Fetch and Detect
 
@@ -123,55 +127,66 @@ int main(int argc, char * argv[]) try
 
     /* Transformation matrix */
 
-    MatrixXd SO3(3,3), T_O_EE(4,4), T_EE_MARK(4,4),
+    MatrixXd SO3(3,3), T_O_EE(4,4), T_EE_MARK(4,4), T_O_MARK(4,4),
              T_MARK_CAM_rot(4,4), T_MARK_CAM_trans(4,4),  T_O_CAM(4,4);
                      
     SO3                = MatrixXd::Identity(3,3);
     T_O_EE             = MatrixXd::Identity(4,4);
     T_EE_MARK          = MatrixXd::Identity(4,4);
+    // T_O_MARK           = MatrixXd::Identity(4,4);
     T_MARK_CAM_rot     = MatrixXd::Identity(4,4);
     T_MARK_CAM_trans   = MatrixXd::Identity(4,4);
     
  
-    char* IP_ADDRESS = "172.16.0.2";
-    try {
-        franka::Robot robot(IP_ADDRESS);
+    bool USE_EE = false;
 
-        size_t count = 0;
-        robot.read([&count, &T_O_EE](const franka::RobotState& robot_state) {
-            // Printing to std::cout adds a delay. This is acceptable for a read loop such as this, but
-            // should not be done in a control loop.
-            std::cout << robot_state << std::endl;
-            
-            for (int i = 0; i < 4; i++){
-               for (int j = 0; j < 4; j++){
-                    T_O_EE(j,i) = robot_state.O_T_EE[4*i+j];
-               } 
-            }
+    if (USE_EE){
+                char* IP_ADDRESS = "172.16.0.2";
+                try {
+                    franka::Robot robot(IP_ADDRESS);
 
-            return 0;
-        });
+                    size_t count = 0;
+                    robot.read([&count, &T_O_EE](const franka::RobotState& robot_state) {
+                        // Printing to std::cout adds a delay. This is acceptable for a read loop such as this, but
+                        // should not be done in a control loop.
+                        std::cout << robot_state << std::endl;
+                        
+                        for (int i = 0; i < 4; i++){
+                           for (int j = 0; j < 4; j++){
+                                T_O_EE(j,i) = robot_state.O_T_EE[4*i+j];
+                           } 
+                        }
 
-        std::cout << "Done." << std::endl;
-    } catch (franka::Exception const& e) {
-        std::cout << e.what() << std::endl;
+                        return 0;
+                    });
+
+                    std::cout << "Done." << std::endl;
+                } catch (franka::Exception const& e) {
+                    std::cout << e.what() << std::endl;
+                }
+
+                double EE_MARK_trans[4] = {-0.05, 0, 0.0085, 1}; // t = [-0.05, 0, 0.0085]', no rotation. 
+                T_EE_MARK.col(3) = Map<Vector4d>(EE_MARK_trans);
+
+                T_O_MARK = T_O_EE * T_EE_MARK;
+
+    }else{
+        // Assumption : you already know transformation from base to marker.
+
+            T_O_MARK << 0, 1,  0, 0.0476,
+                        1, 0,  0, 0.1286,
+                        0, 0, -1, 0,
+                        0, 0,  0, 1;
+
     }
 
-
-
-
-
-
-
-
-    double EE_MARK_trans[4] = {-0.05, 0, 0.0085, 1}; // t = [-0.05, 0, 0.0085]', no rotation. 
-    T_EE_MARK.col(3) = Map<Vector4d>(EE_MARK_trans);
-
+    cout << SO3<<endl;
     for (int i = 0; i < 3; i++){
        for (int j = 0; j < 3; j++){
             SO3(i,j) = pose.R->data[3*i+j];
        } 
     }
+
     T_MARK_CAM_rot.block(0,0,3,3) = SO3.inverse();
 
     double MARK_CAM_trans[4]; 
@@ -183,9 +198,8 @@ int main(int argc, char * argv[]) try
 
 
 
-    T_O_CAM = T_O_EE * T_EE_MARK * T_MARK_CAM_rot * T_MARK_CAM_trans;
-    cout << "Base to EE" << endl << T_O_EE << endl << endl;
-    cout << "EE to marker" << endl << T_EE_MARK << endl << endl;
+    T_O_CAM = T_O_MARK * T_MARK_CAM_rot * T_MARK_CAM_trans;
+    cout << "Base to marker" << endl << T_O_MARK << endl << endl;
     cout << "marker to cam rotation" << endl << T_MARK_CAM_rot << endl << endl;
     cout << "marker to cam translation" << endl << T_MARK_CAM_trans << endl << endl;
 
